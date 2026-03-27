@@ -165,10 +165,13 @@ int remove_false_minutia_V2(MINUTIAE *minutiae,
    }
 
    /* 6. Remove or adjust minutiae that reside on the side of a ridge */
-   /*    or valley.                                                   */
-   if((ret = remove_or_adjust_side_minutiae_V2(minutiae, bdata, iw, ih,
-                                  direction_map, mw, mh, lfsparms))){
-      return(ret);
+   /*    or valley.  Skip when side_half_contour==0 (narrow images   */
+   /*    where short contours always fail and remove valid minutiae). */
+   if(lfsparms->side_half_contour > 0){
+      if((ret = remove_or_adjust_side_minutiae_V2(minutiae, bdata, iw, ih,
+                                     direction_map, mw, mh, lfsparms))){
+         return(ret);
+      }
    }
 
    /* 7. Remove minutiae that form a hook on the side of a ridge or valley. */
@@ -808,6 +811,10 @@ int remove_malformations(MINUTIAE *minutiae,
    print2log("\nREMOVING MALFORMATIONS:\n");
 
    for(i = minutiae->num-1; i >= 0; i--){
+      /* Reset locals so that a stale freed pointer from the previous iteration
+       * cannot be double-freed when trace_contour returns IGNORE (no alloc). */
+      contour_x = contour_y = contour_ex = contour_ey = NULL;
+      ncontour = 0;
       minutia = minutiae->list[i];
       ret = trace_contour(&contour_x, &contour_y,
                           &contour_ex, &contour_ey, &ncontour,
@@ -852,6 +859,9 @@ int remove_malformations(MINUTIAE *minutiae,
 
          /* Deallocate the contours. */
          free_contour(contour_x, contour_y, contour_ex, contour_ey);
+         /* Null out so a subsequent IGNORE return cannot double-free. */
+         contour_x = contour_y = contour_ex = contour_ey = NULL;
+         ncontour = 0;
 
          ret = trace_contour(&contour_x, &contour_y,
                           &contour_ex, &contour_ey, &ncontour,

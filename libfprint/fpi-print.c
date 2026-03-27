@@ -185,6 +185,23 @@ fpi_print_add_from_image (FpPrint *print,
 
   xyt = g_new0 (struct xyt_struct, 1);
   minutiae_to_xyt (&_minutiae, image->width, image->height, xyt);
+
+  fp_dbg ("bz3 image: raw minutiae=%d nrows=%d",
+          (int) minutiae->len, xyt->nrows);
+
+  /* Reject images with too few minutiae to ever score > 0 in bozorth.
+   * MIN_COMPUTABLE_BOZORTH_MINUTIAE (5) is the hard floor, but 3 is used
+   * here: nrows=3-4 barely reach threshold, but blocking at 5 makes the
+   * "center finger" retry fire on almost every scan of this narrow sensor.
+   * Use FP_DEVICE_RETRY so libfprint retries the stage rather than aborting. */
+  if (xyt->nrows < 3)
+    {
+      g_free (xyt);
+      *error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_CENTER_FINGER,
+                                         "Too few minutiae, center your finger on the sensor");
+      return FALSE;
+    }
+
   g_ptr_array_add (print->prints, xyt);
 
   g_clear_object (&print->image);
@@ -234,13 +251,18 @@ fpi_print_bz3_match (FpPrint *template, FpPrint *print, gint bz3_threshold, GErr
   pstruct = g_ptr_array_index (print->prints, 0);
   probe_len = bozorth_probe_init (pstruct);
 
+  fp_dbg ("bz3 probe nrows=%d vs %d templates (threshold=%d)",
+          pstruct->nrows, template->prints->len, bz3_threshold);
+
   for (i = 0; i < template->prints->len; i++)
     {
       struct xyt_struct *gstruct;
       gint score;
       gstruct = g_ptr_array_index (template->prints, i);
       score = bozorth_to_gallery (probe_len, pstruct, gstruct);
-      fp_dbg ("score %d/%d", score, bz3_threshold);
+      g_message ("bz3 score %d/%d (template %d/%d, gallery nrows=%d)",
+                 score, bz3_threshold, i + 1, template->prints->len,
+                 gstruct->nrows);
 
       if (score >= bz3_threshold)
         return FPI_MATCH_SUCCESS;

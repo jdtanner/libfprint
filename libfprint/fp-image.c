@@ -318,6 +318,18 @@ fp_image_detect_minutiae_nbis_thread_func (GTask        *task,
   lfsparms = g_memdup2 (&g_lfsparms_V2, sizeof (LFSPARMS));
   lfsparms->remove_perimeter_pts = minutiae_flags & FPI_IMAGE_PARTIAL ? TRUE : FALSE;
 
+  /* Narrow sensors (< 80px wide) have valid ridge data very close to the
+   * image edge and produce noisy binarization at ridge edges.  Reduce the
+   * invblock margins to 1px (from 4px) and the side contour half-length to
+   * 4 (from 7) to avoid over-aggressive minutiae removal. */
+  if (self->width < 80)
+    {
+      lfsparms->inv_block_margin = 1;
+      lfsparms->trans_dir_pix = 1;
+      lfsparms->side_half_contour = 0;
+      lfsparms->max_hook_len = 10;
+    }
+
   timer = g_timer_new ();
   r = get_minutiae (&ret_data->minutiae, &quality_map, &direction_map,
                     &low_contrast_map, &low_flow_map, &high_curve_map,
