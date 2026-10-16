@@ -947,6 +947,44 @@ set_samples (FpPrint *print, GVariantBuilder *samples)
                 NULL);
 }
 
+/* Debugging aid, off unless ELAN0C7F_DUMP_DIR is set: save each scan that
+ * is matched or enrolled, as an 8-bit PGM with dark ridges (the format of
+ * the capture tool in the elan0c7f-libfprint-driver repository), so live
+ * sessions can be replayed offline.  These are fingerprint images: point
+ * it at a private directory and delete them after use. */
+static void
+dump_scan (FpDevice *dev, const guint8 *pixels, gint width, gint height)
+{
+  const char *dir = g_getenv ("ELAN0C7F_DUMP_DIR");
+  FpiDeviceAction current = fpi_device_get_current_action (dev);
+  const char *action = "other";
+  g_autofree char *name = NULL;
+  g_autofree char *path = NULL;
+
+  g_autoptr(GString) pgm = NULL;
+  g_autoptr(GError) error = NULL;
+
+  if (!dir || !*dir)
+    return;
+
+  if (current == FPI_DEVICE_ACTION_ENROLL)
+    action = "enroll";
+  else if (current == FPI_DEVICE_ACTION_IDENTIFY)
+    action = "identify";
+
+  name = g_strdup_printf ("%" G_GINT64_FORMAT "-%s.pgm",
+                          g_get_real_time (), action);
+  path = g_build_filename (dir, name, NULL);
+  pgm = g_string_new (NULL);
+  g_string_printf (pgm, "P5\n%d %d\n255\n", width, height);
+  g_string_append_len (pgm, (const char *) pixels, (gssize) width * height);
+  if (!g_file_set_contents_full (path, pgm->str, pgm->len,
+                                 G_FILE_SET_CONTENTS_CONSISTENT, 0600, &error))
+    g_warning ("Could not save scan to %s: %s", path, error->message);
+  else
+    fp_dbg ("saved scan to %s", path);
+}
+
 static gboolean
 dev_print_from_image (FpImageDevice *dev, FpImage *image, FpPrint *print,
                       GError **error)
@@ -961,6 +999,8 @@ dev_print_from_image (FpImageDevice *dev, FpImage *image, FpPrint *print,
   if (image->flags & FPI_IMAGE_COLORS_INVERTED)
     for (gsize i = 0; i < npix; i++)
       pixels[i] = 255 - pixels[i];
+
+  dump_scan (FP_DEVICE (dev), pixels, image->width, image->height);
 
   elan0c7f_sift_extract (pixels, image->width, image->height, &f);
   fp_dbg ("sift: %u keypoints", f.n);
