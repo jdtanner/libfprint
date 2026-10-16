@@ -20,6 +20,7 @@
 #pragma once
 
 #include "fpi-device.h"
+#include "fpi-print.h"
 #include "fp-image-device.h"
 
 /**
@@ -84,6 +85,13 @@ typedef enum {
  * @change_state: Notification about the current device state (i.e. waiting for
  *   finger or image capture). Implementing this is optional, it can e.g. be
  *   used to flash an LED when waiting for a finger.
+ * @print_from_image: Optional replacement for NBIS minutiae matching, for
+ *   sensors whose images are too small for it. Fill a new, untyped print from
+ *   one image, or fail with a #FP_DEVICE_RETRY error for an unusable scan.
+ *   If set, @print_merge and @print_match must be set too.
+ * @print_merge: Add a print from @print_from_image to an enrollment print.
+ * @print_match: Compare a print from @print_from_image against a stored
+ *   template.
  *
  * These are the main entry points for drivers to implement. Drivers may not
  * implement all of these entry points if they do not support the operation
@@ -114,6 +122,18 @@ struct _FpImageDeviceClass
   void          (*change_state) (FpImageDevice      *dev,
                                  FpiImageDeviceState state);
   void          (*deactivate)   (FpImageDevice *dev);
+
+  gboolean      (*print_from_image) (FpImageDevice *dev,
+                                     FpImage       *image,
+                                     FpPrint       *print,
+                                     GError       **error);
+  void (*print_merge)      (FpImageDevice *dev,
+                            FpPrint       *enroll_print,
+                            FpPrint       *print);
+  FpiMatchResult (*print_match)      (FpImageDevice *dev,
+                                      FpPrint       *print_template,
+                                      FpPrint       *print,
+                                      GError       **error);
 };
 
 void fpi_image_device_set_bz3_threshold (FpImageDevice *self,

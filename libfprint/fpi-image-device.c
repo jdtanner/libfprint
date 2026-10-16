@@ -245,6 +245,7 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
   g_autoptr(FpPrint) print = NULL;
   GError *error = NULL;
   FpImageDevice *self = FP_IMAGE_DEVICE (user_data);
+  FpImageDeviceClass *cls = FP_IMAGE_DEVICE_GET_CLASS (self);
   FpDevice *device = FP_DEVICE (self);
   FpImageDevicePrivate *priv;
   FpiDeviceAction action;
@@ -263,11 +264,21 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
           return;
         }
 
-      /* Replace error with a retry condition. */
-      g_warning ("Failed to detect minutiae: %s", error->message);
-      g_clear_pointer (&error, g_error_free);
+      if (cls->print_match)
+        {
+          /* The driver's own matcher does not use minutiae. */
+          fp_dbg ("Minutiae detection failed (%s), not needed by driver matcher",
+                  error->message);
+          g_clear_pointer (&error, g_error_free);
+        }
+      else
+        {
+          /* Replace error with a retry condition. */
+          g_warning ("Failed to detect minutiae: %s", error->message);
+          g_clear_pointer (&error, g_error_free);
 
-      error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_GENERAL, "Minutiae detection failed, please retry");
+          error = fpi_device_retry_new_msg (FP_DEVICE_RETRY_GENERAL, "Minutiae detection failed, please retry");
+        }
     }
 
   action = fpi_device_get_current_action (device);
@@ -281,9 +292,20 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
 
   if (!error)
     {
+      gboolean ok;
+
       print = fp_print_new (device);
-      fpi_print_set_type (print, FPI_PRINT_NBIS);
-      if (!fpi_print_add_from_image (print, image, &error))
+      if (cls->print_match)
+        {
+          ok = cls->print_from_image (self, image, print, &error);
+        }
+      else
+        {
+          fpi_print_set_type (print, FPI_PRINT_NBIS);
+          ok = fpi_print_add_from_image (print, image, &error);
+        }
+
+      if (!ok)
         {
           g_clear_object (&print);
 
@@ -304,7 +326,10 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
 
       if (print)
         {
-          fpi_print_add_print (enroll_print, print);
+          if (cls->print_match)
+            cls->print_merge (self, enroll_print, print);
+          else
+            fpi_print_add_print (enroll_print, print);
           priv->enroll_stage += 1;
         }
 
@@ -332,8 +357,14 @@ fpi_image_device_minutiae_detected (GObject *source_object, GAsyncResult *res, g
       for (i = 0; !error && i < templates->len; i++)
         {
           FpPrint *template = g_ptr_array_index (templates, i);
+          FpiMatchResult match;
 
-          if (fpi_print_bz3_match (template, print, priv->bz3_threshold, &error) == FPI_MATCH_SUCCESS)
+          if (cls->print_match)
+            match = cls->print_match (self, template, print, &error);
+          else
+            match = fpi_print_bz3_match (template, print, priv->bz3_threshold, &error);
+
+          if (match == FPI_MATCH_SUCCESS)
             {
               result = template;
               break;
