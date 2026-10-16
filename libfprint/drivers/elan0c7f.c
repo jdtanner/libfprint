@@ -24,17 +24,18 @@
  * Sensor: 52x150 pixels, 16-bit little-endian, 15600 bytes per frame.
  * All endpoints are bulk (not interrupt).
  *
- * Init (ARM) sequence:
+ * Init sequence:
  *   write [9a 10] -> read EP83 (discard)
  *   write [9a 10] -> read EP83 (discard)
  *   write [00 0b]
  *   write [9a 10] -> read EP83 (discard)
+ *
+ * Arm and wait for finger (start of each capture cycle):
  *   write [40 31]
- *   write [40 3f]
- *   The Windows driver then blocks on EP83 until 0x55 (finger detected;
- *   0xca = retry).  This driver does not read that response; it detects
- *   the finger by polling frames and scoring their quality instead, and
- *   the INIT_FLUSH reads drain the stale EP83 byte on the next re-arm.
+ *   write [40 3f] -> read EP83, which completes only once a finger is
+ *   placed: 0x55 = finger detected, 0xca = busy, re-arm after 200 ms.
+ *   Waiting on this instead of polling frames avoids streaming ~23 blank
+ *   frames/s (~350 KB/s) over USB while idle.
  *
  * Frame capture:
  *   write [00 09] -> read EP82 -> 15600 bytes
@@ -71,6 +72,11 @@
 #define TIMEOUT_MS   3000
 #define QUALITY_MIN  20
 #define SENSOR_PPMM  19.685f  /* ~500 DPI */
+#define REARM_AFTER_LOW_FRAMES 5  /* Re-arm after this many consecutive misses */
+#define BUSY_RETRY_MS 200
+
+#define RESP_FINGER  0x55
+#define RESP_BUSY    0xca
 
 /* Commands */
 static const guint8 CMD_9A10[]   = { 0x9a, 0x10 };
@@ -93,14 +99,15 @@ enum {
   INIT_000B_SEND,
   INIT_9A10_3_SEND,
   INIT_9A10_3_READ,
-  INIT_4031_SEND,
-  INIT_403F_SEND,
   INIT_DONE,
   INIT_NUM_STATES,
 };
 
 /* Capture SSM states (separate enum, separate SSM) */
 enum {
+  CAPTURE_ARM_4031,
+  CAPTURE_ARM_403F,
+  CAPTURE_WAIT_FINGER,      /* Block on EP83 until the sensor sees a finger */
   CAPTURE_SEND_FRAME_CMD,
   CAPTURE_READ_FRAME,
   CAPTURE_CHECK_QUALITY,
@@ -123,6 +130,7 @@ struct _FpiDeviceElan0c7f
   gboolean      finger_on;        /* Finger currently detected? */
   gboolean      deactivating;     /* Deactivation requested? */
   gboolean      ssm_active;       /* An init or capture SSM is in flight? */
+  GCancellable *cancellable;      /* Cancels the finger wait on deactivate */
 };
 
 G_DECLARE_FINAL_TYPE (FpiDeviceElan0c7f, fpi_device_elan0c7f, FPI,
@@ -317,6 +325,14 @@ start_capture_ssm (FpImageDevice *idev);
 
 
 static void
+release_resources (FpiDeviceElan0c7f *self)
+{
+  g_clear_pointer (&self->frame_buf, g_free);
+  g_clear_object (&self->best_img);
+  g_clear_object (&self->cancellable);
+}
+
+static void
 init_run_state (FpiSsm *ssm, FpDevice *dev)
 {
   switch (fpi_ssm_get_cur_state (ssm))
@@ -353,16 +369,6 @@ init_run_state (FpiSsm *ssm, FpDevice *dev)
       send_cmd (ssm, dev, CMD_000B, sizeof (CMD_000B));
       break;
 
-    /* Send 4031 */
-    case INIT_4031_SEND:
-      send_cmd (ssm, dev, CMD_4031, sizeof (CMD_4031));
-      break;
-
-    /* Send 403f -- sensor is now armed and waiting for finger */
-    case INIT_403F_SEND:
-      send_cmd (ssm, dev, CMD_403F, sizeof (CMD_403F));
-      break;
-
     case INIT_DONE:
       fpi_ssm_mark_completed (ssm);
       break;
@@ -386,7 +392,7 @@ init_done (FpiSsm *ssm, FpDevice *dev, GError *error)
   if (error)
     {
       /* libfprint does not call deactivate after a failed activation. */
-      g_clear_pointer (&self->frame_buf, g_free);
+      release_resources (self);
       fpi_image_device_activate_complete (idev, error);
       return;
     }
@@ -407,8 +413,7 @@ reinit_done (FpiSsm *ssm, FpDevice *dev, GError *error)
     {
       /* The SSM hands us ownership of error; it is moot once deactivating. */
       g_clear_error (&error);
-      g_clear_pointer (&self->frame_buf, g_free);
-      g_clear_object (&self->best_img);
+      release_resources (self);
       fpi_image_device_deactivate_complete (idev, NULL);
       return;
     }
@@ -423,6 +428,44 @@ reinit_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 }
 
 /* -- Capture SSM -- */
+
+static void
+finger_wait_cb (FpiUsbTransfer *transfer, FpDevice *dev,
+                gpointer user_data, GError *error)
+{
+  FpiSsm            *ssm  = user_data;
+  FpiDeviceElan0c7f *self = FPI_DEVICE_ELAN0C7F (dev);
+
+  /* dev_deactivate cancels this read; that is the normal way out. */
+  if (self->deactivating)
+    {
+      g_clear_error (&error);
+      fpi_ssm_mark_completed (ssm);
+      return;
+    }
+
+  if (error)
+    {
+      fpi_ssm_mark_failed (ssm, error);
+      return;
+    }
+
+  if (transfer->actual_length >= 1 && transfer->buffer[0] == RESP_FINGER)
+    {
+      fp_dbg ("sensor reports finger present");
+      fpi_ssm_next_state (ssm);
+      return;
+    }
+
+  if (transfer->actual_length >= 1 && transfer->buffer[0] == RESP_BUSY)
+    fp_dbg ("sensor busy (0xca), re-arming");
+  else
+    fp_warn ("unexpected finger-wait response (%d bytes, first 0x%02x), re-arming",
+             (int) transfer->actual_length,
+             transfer->actual_length ? transfer->buffer[0] : 0);
+
+  fpi_ssm_jump_to_state_delayed (ssm, CAPTURE_ARM_4031, BUSY_RETRY_MS);
+}
 
 static void
 frame_read_cb (FpiUsbTransfer *transfer, FpDevice *dev,
@@ -534,6 +577,27 @@ capture_run_state (FpiSsm *ssm, FpDevice *dev)
 
   switch (fpi_ssm_get_cur_state (ssm))
     {
+    case CAPTURE_ARM_4031:
+      send_cmd (ssm, dev, CMD_4031, sizeof (CMD_4031));
+      break;
+
+    case CAPTURE_ARM_403F:
+      send_cmd (ssm, dev, CMD_403F, sizeof (CMD_403F));
+      break;
+
+    case CAPTURE_WAIT_FINGER:
+      {
+        /* No timeout: the sensor answers only when touched, and
+         * dev_deactivate cancels the read. */
+        FpiUsbTransfer *transfer = fpi_usb_transfer_new (dev);
+        fpi_usb_transfer_fill_bulk (transfer, EP_STATUS, 64);
+        transfer->short_is_error = FALSE;
+        self->low_quality_count = 0;
+        fpi_usb_transfer_submit (transfer, 0, self->cancellable,
+                                 finger_wait_cb, ssm);
+        return;
+      }
+
     case CAPTURE_SEND_FRAME_CMD:
       send_cmd (ssm, dev, CMD_FRAME, sizeof (CMD_FRAME));
       break;
@@ -597,6 +661,11 @@ capture_run_state (FpiSsm *ssm, FpDevice *dev)
             if (self->finger_on && self->best_img != NULL &&
                 self->low_quality_count >= 2 && self->frame_count >= 3)
               fpi_ssm_jump_to_state (ssm, CAPTURE_AWAIT_LIFT);
+            /* No usable finger for a while (a false trigger, or a tap too
+             * short to use): stop streaming frames and wait on the sensor's
+             * finger detect again.  Any good frames so far are kept. */
+            else if (self->low_quality_count >= REARM_AFTER_LOW_FRAMES)
+              fpi_ssm_jump_to_state (ssm, CAPTURE_ARM_4031);
             else
               fpi_ssm_jump_to_state (ssm, CAPTURE_SEND_FRAME_CMD);
           }
@@ -647,8 +716,7 @@ capture_done (FpiSsm *ssm, FpDevice *dev, GError *error)
     {
       /* The SSM hands us ownership of error; it is moot once deactivating. */
       g_clear_error (&error);
-      g_clear_pointer (&self->frame_buf, g_free);
-      g_clear_object (&self->best_img);
+      release_resources (self);
       fpi_image_device_deactivate_complete (idev, NULL);
       return;
     }
@@ -728,6 +796,7 @@ dev_activate (FpImageDevice *dev)
   self->frame_count = 0;
   self->best_quality = 0;
   self->frame_buf = g_malloc0 (FRAME_SIZE);
+  self->cancellable = g_cancellable_new ();
 
   ssm = fpi_ssm_new (FP_DEVICE (dev), init_run_state, INIT_NUM_STATES);
   fpi_ssm_start (ssm, init_done);
@@ -744,11 +813,13 @@ dev_deactivate (FpImageDevice *dev)
    * If an SSM is running, its pending USB callbacks still hold pointers into
    * frame_buf and best_img — freeing them here causes a use-after-free when
    * those callbacks fire.  Instead, defer cleanup to capture_done /
-   * reinit_done which run only after all USB transfers have completed. */
-  if (!self->ssm_active)
+   * reinit_done which run only after all USB transfers have completed.
+   * Cancelling ends a finger wait that would otherwise never complete. */
+  if (self->ssm_active)
+    g_cancellable_cancel (self->cancellable);
+  else
     {
-      g_clear_pointer (&self->frame_buf, g_free);
-      g_clear_object (&self->best_img);
+      release_resources (self);
       fpi_image_device_deactivate_complete (dev, NULL);
     }
 }
