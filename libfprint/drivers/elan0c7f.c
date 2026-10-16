@@ -807,13 +807,11 @@ fpi_device_elan0c7f_class_init (FpiDeviceElan0c7fClass *klass)
    * more than the default 5 to end up with enough usable templates. */
   dev_class->nr_enroll_stages = 8;
 
-  /* Disable IDENTIFY: fprintd crashes (SEGV at 0x7b6, null-pointer call)
-   * when it calls fp_device_identify() with an empty gallery during the
-   * first-ever enrollment (no prints stored yet).  Without IDENTIFY,
-   * fprintd skips duplicate detection and calls enroll directly, which
-   * is the correct behaviour.  Authentication still works because fprintd
-   * falls back to verify when the feature is absent. */
-  dev_class->features &= ~FP_DEVICE_FEATURE_IDENTIFY;
+  /* IDENTIFY must stay enabled: since 1.94.100 image devices implement
+   * verify via identify with a single-print gallery, so masking it out
+   * makes every verify fail with FP_DEVICE_ERROR_NOT_SUPPORTED.  (On
+   * 1.94.10 it was masked to avoid an fprintd crash on identify with an
+   * empty gallery during first enrollment.) */
 
   img_class->img_width    = IMG_WIDTH;
   img_class->img_height   = IMG_HEIGHT;
