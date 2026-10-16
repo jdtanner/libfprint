@@ -61,22 +61,22 @@
 
 /* -- Constants -- */
 
-#define EP_OUT       0x01
-#define EP_IN        0x82
-#define EP_STATUS    0x83
-#define FRAME_SIZE   15600
-#define RAW_WIDTH    52
-#define RAW_HEIGHT   150
-#define IMG_WIDTH    RAW_WIDTH   /* 52 */
-#define IMG_HEIGHT   RAW_HEIGHT  /* 150 */
-#define TIMEOUT_MS   3000
-#define QUALITY_MIN  20
-#define SENSOR_PPMM  19.685f  /* ~500 DPI */
+#define EP_OUT 0x01
+#define EP_IN 0x82
+#define EP_STATUS 0x83
+#define FRAME_SIZE 15600
+#define RAW_WIDTH 52
+#define RAW_HEIGHT 150
+#define IMG_WIDTH RAW_WIDTH      /* 52 */
+#define IMG_HEIGHT RAW_HEIGHT    /* 150 */
+#define TIMEOUT_MS 3000
+#define QUALITY_MIN 20
+#define SENSOR_PPMM 19.685f   /* ~500 DPI */
 #define REARM_AFTER_LOW_FRAMES 5  /* Re-arm after this many consecutive misses */
 #define BUSY_RETRY_MS 200
 
-#define RESP_FINGER  0x55
-#define RESP_BUSY    0xca
+#define RESP_FINGER 0x55
+#define RESP_BUSY 0xca
 
 /* Commands */
 static const guint8 CMD_9A10[]   = { 0x9a, 0x10 };
@@ -189,9 +189,9 @@ frame_to_image (const guint8 *raw_data)
    * Scale 16-bit to 8-bit using the actual per-frame value range.
    */
   const guint16 *pixels = (const guint16 *) raw_data;
-  guint16        min_val = 65535, max_val = 0;
-  FpImage       *img;
-  guint8        *out;
+  guint16 min_val = 65535, max_val = 0;
+  FpImage *img;
+  guint8 *out;
 
   /* Find the actual value range */
   for (int i = 0; i < RAW_HEIGHT * RAW_WIDTH; i++)
@@ -220,7 +220,7 @@ frame_to_image (const guint8 *raw_data)
       for (int x = 0; x < RAW_WIDTH; x++)
         {
           guint16 v = GUINT16_FROM_LE (pixels[y * RAW_WIDTH + x]);
-          guint32 scaled = (guint32)(v - min_val) * 255u / (guint32)(max_val - min_val);
+          guint32 scaled = (guint32) (v - min_val) * 255u / (guint32) (max_val - min_val);
           out[y * IMG_WIDTH + x] = (guint8) scaled;
         }
     }
@@ -237,9 +237,9 @@ frame_to_image (const guint8 *raw_data)
             int xm = MAX (x - 1, 0);
             int xp = MIN (x + 1, IMG_WIDTH - 1);
             tmp[y * IMG_WIDTH + x] = (guint8)
-              ((out[y * IMG_WIDTH + xm] +
-                2 * (guint16) out[y * IMG_WIDTH + x] +
-                out[y * IMG_WIDTH + xp] + 2) / 4);
+                                     ((out[y * IMG_WIDTH + xm] +
+                                       2 * (guint16) out[y * IMG_WIDTH + x] +
+                                       out[y * IMG_WIDTH + xp] + 2) / 4);
           }
       }
     /* Vertical pass */
@@ -250,9 +250,9 @@ frame_to_image (const guint8 *raw_data)
             int ym = MAX (y - 1, 0);
             int yp = MIN (y + 1, IMG_HEIGHT - 1);
             out[y * IMG_WIDTH + x] = (guint8)
-              ((tmp[ym * IMG_WIDTH + x] +
-                2 * (guint16) tmp[y  * IMG_WIDTH + x] +
-                tmp[yp * IMG_WIDTH + x] + 2) / 4);
+                                     ((tmp[ym * IMG_WIDTH + x] +
+                                       2 * (guint16) tmp[y  * IMG_WIDTH + x] +
+                                       tmp[yp * IMG_WIDTH + x] + 2) / 4);
           }
       }
   }
@@ -281,9 +281,9 @@ image_quality (FpImage *img)
    * the quality comparison even though their raw std-dev is lower.
    */
   guint8 *data = img->data;
-  gint    npix = IMG_WIDTH * IMG_HEIGHT;
-  gint64  sum = 0, sum_sq = 0;
-  gint    zero_count = 0;
+  gint npix = IMG_WIDTH * IMG_HEIGHT;
+  gint64 sum = 0, sum_sq = 0;
+  gint zero_count = 0;
 
   for (int i = 0; i < npix; i++)
     {
@@ -313,13 +313,19 @@ image_quality (FpImage *img)
 
 /* -- State machine -- */
 
-static void init_run_state (FpiSsm *ssm, FpDevice *dev);
-static void init_done (FpiSsm *ssm, FpDevice *dev, GError *error);
-static void capture_done (FpiSsm *ssm, FpDevice *dev, GError *error);
-static void reinit_done (FpiSsm *ssm, FpDevice *dev, GError *error);
+static void init_run_state (FpiSsm   *ssm,
+                            FpDevice *dev);
+static void init_done (FpiSsm   *ssm,
+                       FpDevice *dev,
+                       GError   *error);
+static void capture_done (FpiSsm   *ssm,
+                          FpDevice *dev,
+                          GError   *error);
+static void reinit_done (FpiSsm   *ssm,
+                         FpDevice *dev,
+                         GError   *error);
 
-static void
-start_capture_ssm (FpImageDevice *idev);
+static void start_capture_ssm (FpImageDevice *idev);
 
 /* -- Init SSM -- */
 
@@ -385,7 +391,7 @@ static void
 init_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
   FpiDeviceElan0c7f *self = FPI_DEVICE_ELAN0C7F (dev);
-  FpImageDevice     *idev = FP_IMAGE_DEVICE (dev);
+  FpImageDevice *idev = FP_IMAGE_DEVICE (dev);
 
   self->ssm_active = FALSE;
 
@@ -405,7 +411,7 @@ static void
 reinit_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
   FpiDeviceElan0c7f *self = FPI_DEVICE_ELAN0C7F (dev);
-  FpImageDevice     *idev = FP_IMAGE_DEVICE (dev);
+  FpImageDevice *idev = FP_IMAGE_DEVICE (dev);
 
   self->ssm_active = FALSE;
 
@@ -433,7 +439,7 @@ static void
 finger_wait_cb (FpiUsbTransfer *transfer, FpDevice *dev,
                 gpointer user_data, GError *error)
 {
-  FpiSsm            *ssm  = user_data;
+  FpiSsm *ssm  = user_data;
   FpiDeviceElan0c7f *self = FPI_DEVICE_ELAN0C7F (dev);
 
   /* dev_deactivate cancels this read; that is the normal way out. */
@@ -471,7 +477,7 @@ static void
 frame_read_cb (FpiUsbTransfer *transfer, FpDevice *dev,
                gpointer user_data, GError *error)
 {
-  FpiSsm            *ssm  = user_data;
+  FpiSsm *ssm  = user_data;
   FpiDeviceElan0c7f *self  = FPI_DEVICE_ELAN0C7F (dev);
 
   if (error)
@@ -507,9 +513,9 @@ static void
 lift_frame_read_cb (FpiUsbTransfer *transfer, FpDevice *dev,
                     gpointer user_data, GError *error)
 {
-  FpiSsm            *ssm  = user_data;
+  FpiSsm *ssm  = user_data;
   FpiDeviceElan0c7f *self = FPI_DEVICE_ELAN0C7F (dev);
-  FpImageDevice     *idev = FP_IMAGE_DEVICE (dev);
+  FpImageDevice *idev = FP_IMAGE_DEVICE (dev);
 
   /* dev_deactivate may have been called while this transfer was in flight.
    * frame_buf and best_img are still alive (freed only after the SSM exits),
@@ -567,7 +573,7 @@ static void
 capture_run_state (FpiSsm *ssm, FpDevice *dev)
 {
   FpiDeviceElan0c7f *self = FPI_DEVICE_ELAN0C7F (dev);
-  FpImageDevice     *idev = FP_IMAGE_DEVICE (dev);
+  FpImageDevice *idev = FP_IMAGE_DEVICE (dev);
 
   if (self->deactivating)
     {
@@ -615,7 +621,7 @@ capture_run_state (FpiSsm *ssm, FpDevice *dev)
     case CAPTURE_CHECK_QUALITY:
       {
         FpImage *img = frame_to_image (self->frame_buf);
-        gint     quality = image_quality (img);
+        gint quality = image_quality (img);
 
         if (quality >= QUALITY_MIN)
           {
@@ -708,7 +714,7 @@ static void
 capture_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 {
   FpiDeviceElan0c7f *self = FPI_DEVICE_ELAN0C7F (dev);
-  FpImageDevice     *idev = FP_IMAGE_DEVICE (dev);
+  FpImageDevice *idev = FP_IMAGE_DEVICE (dev);
 
   self->ssm_active = FALSE;
 
@@ -745,7 +751,7 @@ start_capture_ssm (FpImageDevice *idev)
   g_clear_object (&self->best_img);
 
   ssm = fpi_ssm_new (FP_DEVICE (idev), capture_run_state,
-                      CAPTURE_NUM_STATES);
+                     CAPTURE_NUM_STATES);
   self->ssm_active = TRUE;
   fpi_ssm_start (ssm, capture_done);
 }
@@ -816,7 +822,9 @@ dev_deactivate (FpImageDevice *dev)
    * reinit_done which run only after all USB transfers have completed.
    * Cancelling ends a finger wait that would otherwise never complete. */
   if (self->ssm_active)
-    g_cancellable_cancel (self->cancellable);
+    {
+      g_cancellable_cancel (self->cancellable);
+    }
   else
     {
       release_resources (self);
@@ -834,7 +842,7 @@ dev_change_state (FpImageDevice *dev, FpiImageDeviceState state)
        * it has finished processing a submitted image. */
       {
         FpiSsm *init_ssm = fpi_ssm_new (FP_DEVICE (dev), init_run_state,
-                                         INIT_NUM_STATES);
+                                        INIT_NUM_STATES);
         FPI_DEVICE_ELAN0C7F (dev)->ssm_active = TRUE;
         fpi_ssm_start (init_ssm, reinit_done);
       }
@@ -846,7 +854,7 @@ dev_change_state (FpImageDevice *dev, FpiImageDeviceState state)
 
     case FPI_IMAGE_DEVICE_STATE_AWAIT_FINGER_OFF:
       /* lift_frame_read_cb will call report_finger_status(FALSE)
-       * once it detects the actual lift -- nothing to do here. */
+      * once it detects the actual lift -- nothing to do here. */
       break;
 
     case FPI_IMAGE_DEVICE_STATE_INACTIVE:
@@ -872,7 +880,7 @@ fpi_device_elan0c7f_init (FpiDeviceElan0c7f *self)
 static void
 fpi_device_elan0c7f_class_init (FpiDeviceElan0c7fClass *klass)
 {
-  FpDeviceClass      *dev_class = FP_DEVICE_CLASS (klass);
+  FpDeviceClass *dev_class = FP_DEVICE_CLASS (klass);
   FpImageDeviceClass *img_class = FP_IMAGE_DEVICE_CLASS (klass);
 
   dev_class->id        = "elan0c7f";
