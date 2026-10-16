@@ -30,8 +30,11 @@
  *   write [00 0b]
  *   write [9a 10] -> read EP83 (discard)
  *   write [40 31]
- *   write [40 3f] -> read EP83 -> 0x55 = finger detected
- *   If 0xca, retry once after 200ms.
+ *   write [40 3f]
+ *   The Windows driver then blocks on EP83 until 0x55 (finger detected;
+ *   0xca = retry).  This driver does not read that response; it detects
+ *   the finger by polling frames and scoring their quality instead, and
+ *   the INIT_FLUSH reads drain the stale EP83 byte on the next re-arm.
  *
  * Frame capture:
  *   write [00 09] -> read EP82 -> 15600 bytes
@@ -382,6 +385,8 @@ init_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 
   if (error)
     {
+      /* libfprint does not call deactivate after a failed activation. */
+      g_clear_pointer (&self->frame_buf, g_free);
       fpi_image_device_activate_complete (idev, error);
       return;
     }
@@ -400,6 +405,8 @@ reinit_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 
   if (self->deactivating)
     {
+      /* The SSM hands us ownership of error; it is moot once deactivating. */
+      g_clear_error (&error);
       g_clear_pointer (&self->frame_buf, g_free);
       g_clear_object (&self->best_img);
       fpi_image_device_deactivate_complete (idev, NULL);
@@ -638,6 +645,8 @@ capture_done (FpiSsm *ssm, FpDevice *dev, GError *error)
 
   if (self->deactivating)
     {
+      /* The SSM hands us ownership of error; it is moot once deactivating. */
+      g_clear_error (&error);
       g_clear_pointer (&self->frame_buf, g_free);
       g_clear_object (&self->best_img);
       fpi_image_device_deactivate_complete (idev, NULL);
