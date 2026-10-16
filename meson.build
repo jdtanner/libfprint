@@ -136,7 +136,7 @@ drivers_info = {
     'synaptics': {},
     'elan': { 'endian_dependent': true },
     'elanmoc': {},
-    'elan0c7f': {},
+    'elan0c7f': { 'helper': ['opencv'] },
     'uru4000': { 'helper': ['openssl'] },
     'upektc': {},
     'upeksonly': {},
@@ -244,6 +244,13 @@ foreach i : driver_helpers
         endif
 
         optional_deps += openssl_dep
+    elif i == 'opencv'
+        opencv_dep = dependency('opencv4', required: false)
+        if not opencv_dep.found()
+            error('OpenCV is required for @0@'.format(driver))
+        endif
+
+        optional_deps += opencv_dep
     elif i == 'udev'
         install_udev_rules = true
 
