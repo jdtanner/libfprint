@@ -159,6 +159,11 @@ usb:v04F3p0C58*
  ID_AUTOSUSPEND=1
  ID_PERSIST=0
 
+# Supported by libfprint driver elan0c7f
+usb:v04F3p0C7F*
+ ID_AUTOSUSPEND=1
+ ID_PERSIST=0
+
 # Supported by libfprint driver elanmoc
 usb:v04F3p0C7D*
 usb:v04F3p0C7E*
@@ -402,7 +407,6 @@ usb:v04F3p0C70*
 usb:v04F3p0C72*
 usb:v04F3p0C77*
 usb:v04F3p0C7C*
-usb:v04F3p0C7F*
 usb:v04F3p0C80*
 usb:v04F3p0C85*
 usb:v04F3p0C8A*
