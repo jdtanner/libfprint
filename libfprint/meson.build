@@ -123,6 +123,7 @@ driver_sources = {
     'elanmoc' : files('drivers/elanmoc/elanmoc.c'),
     'elan0c7f' : files(
         'drivers/elan0c7f.c',
+        'drivers/elan0c7f-learn.c',
         'drivers/elan0c7f-sift.cpp',
     ),
     'elanspi' : files('drivers/elanspi.c'),

@@ -58,6 +58,7 @@
 #define FP_COMPONENT "elan0c7f"
 
 #include "drivers_api.h"
+#include "elan0c7f-learn.h"
 #include "elan0c7f-sift.h"
 
 /* -- Constants -- */
@@ -874,12 +875,21 @@ dev_change_state (FpImageDevice *dev, FpiImageDeviceState state)
  * one (positions, descriptors) sample per enrollment scan.  A probe holds a
  * single sample, and matches a template when any sample scores at least
  * MATCH_THRESHOLD.  Version 1 prints were made without the icon correction
- * and are not comparable, so they must be re-enrolled. */
+ * and are not comparable, so they must be re-enrolled.
+ *
+ * Learning (elan0c7f-learn.c): a touch scoring at least LEARN_THRESHOLD
+ * against an enrolled sample is kept, up to LEARN_MAX_SAMPLES (oldest
+ * replaced), and later touches match against those too.  Twelve scans of a
+ * 2.6 mm wide patch cover only part of a finger; replaying 63 real scans,
+ * learning raised acceptance from 38 to 56, and the highest wrong-finger
+ * score over 40 scans of four other fingers went from 4 to 5. */
 
 #define PRINT_FORMAT "(ua(aday))"
 #define PRINT_FORMAT_VERSION 2
 #define MATCH_THRESHOLD 8
 #define MIN_KEYPOINTS 20
+#define LEARN_THRESHOLD 15
+#define LEARN_MAX_SAMPLES 24
 
 static GVariant *
 sample_new (const Elan0c7fFeatures *f)
@@ -1052,6 +1062,36 @@ dev_print_merge (FpImageDevice *dev, FpPrint *enroll_print, FpPrint *print)
   set_samples (enroll_print, &samples);
 }
 
+/* The best score of @probe against @samples, stopping early once one
+ * reaches @enough. */
+static gint
+best_score (const Elan0c7fFeatures *probe, GVariant *samples,
+            const char *what, gint enough)
+{
+  gsize n = g_variant_n_children (samples);
+  gint best = 0;
+
+  for (gsize i = 0; i < n && best < enough; i++)
+    {
+      g_autoptr(GVariant) sample_v = g_variant_get_child_value (samples, i);
+      Elan0c7fFeatures sample = { 0 };
+      gint score;
+
+      if (!sample_parse (sample_v, &sample))
+        {
+          g_warning ("Skipping corrupt %s %" G_GSIZE_FORMAT, what, i + 1);
+          continue;
+        }
+
+      score = elan0c7f_sift_score (probe, &sample);
+      fp_dbg ("sift score %d/%d (%s %" G_GSIZE_FORMAT "/%" G_GSIZE_FORMAT ")",
+              score, MATCH_THRESHOLD, what, i + 1, n);
+      best = MAX (best, score);
+      elan0c7f_features_clear (&sample);
+    }
+  return best;
+}
+
 static FpiMatchResult
 dev_print_match (FpImageDevice *dev, FpPrint *print_template, FpPrint *print,
                  GError **error)
@@ -1061,7 +1101,8 @@ dev_print_match (FpImageDevice *dev, FpPrint *print_template, FpPrint *print,
   g_autoptr(GVariant) probe_v = NULL;
   Elan0c7fFeatures probe = { 0 };
   FpiMatchResult result = FPI_MATCH_FAIL;
-  gsize n;
+  const char *dir;
+  gint best;
 
   if (!probes || g_variant_n_children (probes) != 1)
     {
@@ -1087,25 +1128,37 @@ dev_print_match (FpImageDevice *dev, FpPrint *print_template, FpPrint *print,
       return FPI_MATCH_ERROR;
     }
 
-  n = g_variant_n_children (templates);
-  for (gsize i = 0; i < n && result != FPI_MATCH_SUCCESS; i++)
+  /* Every enrolled sample is scored, not just until one passes: whether
+   * this touch is learned depends on the best of them. */
+  best = best_score (&probe, templates, "sample", G_MAXINT);
+  if (best >= MATCH_THRESHOLD)
+    result = FPI_MATCH_SUCCESS;
+
+  dir = elan0c7f_learn_dir ();
+  if (dir)
     {
-      g_autoptr(GVariant) sample_v = g_variant_get_child_value (templates, i);
-      Elan0c7fFeatures sample = { 0 };
-      gint score;
+      g_autofree gchar *key = elan0c7f_learn_key (templates);
+      g_autoptr(GVariant) learned = elan0c7f_learn_load (dir, key);
 
-      if (!sample_parse (sample_v, &sample))
-        {
-          g_warning ("Skipping corrupt sample %" G_GSIZE_FORMAT " of stored fingerprint", i);
-          continue;
-        }
-
-      score = elan0c7f_sift_score (&probe, &sample);
-      fp_dbg ("sift score %d/%d (sample %" G_GSIZE_FORMAT "/%" G_GSIZE_FORMAT ")",
-              score, MATCH_THRESHOLD, i + 1, n);
-      if (score >= MATCH_THRESHOLD)
+      if (learned && result != FPI_MATCH_SUCCESS &&
+          best_score (&probe, learned, "learned", MATCH_THRESHOLD) >= MATCH_THRESHOLD)
         result = FPI_MATCH_SUCCESS;
-      elan0c7f_features_clear (&sample);
+
+      /* Learn only from a confident match against the ENROLLED samples,
+       * never from one against a learned sample: otherwise a touch a little
+       * off the finger could teach it one a little further off, and the
+       * print would drift.  A wrong finger has never scored above 6. */
+      if (best >= LEARN_THRESHOLD)
+        {
+          g_autoptr(GVariant) updated = elan0c7f_learn_add (learned, probe_v, LEARN_MAX_SAMPLES);
+          g_autoptr(GError) save_error = NULL;
+
+          if (elan0c7f_learn_save (dir, key, updated, &save_error))
+            fp_dbg ("learned this scan (%" G_GSIZE_FORMAT " learned samples)",
+                    g_variant_n_children (updated));
+          else
+            g_warning ("Could not save learned samples: %s", save_error->message);
+        }
     }
 
   elan0c7f_features_clear (&probe);
