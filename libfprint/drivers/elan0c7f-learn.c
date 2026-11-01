@@ -34,6 +34,7 @@
  */
 
 #include <errno.h>
+#include <string.h>
 #include <glib/gstdio.h>
 
 #include "elan0c7f-learn.h"
@@ -68,26 +69,30 @@ learn_path (const char *dir, const char *key)
 }
 
 GVariant *
-elan0c7f_learn_load (const char *dir, const char *key)
+elan0c7f_learn_load (const char *dir, const char *key, GError **error)
 {
   g_autofree gchar *path = learn_path (dir, key);
+  g_autofree gchar *contents = NULL;
 
-  g_autoptr(GMappedFile) file = NULL;
   g_autoptr(GBytes) bytes = NULL;
   g_autoptr(GVariant) data = NULL;
-  g_autoptr(GError) error = NULL;
+  g_autoptr(GError) read_error = NULL;
   guint32 version;
+  gsize len;
   GVariant *samples;
 
-  file = g_mapped_file_new (path, FALSE, &error);
-  if (!file)
+  /* Read, not mapped: fprintd's SELinux policy allows reading its state
+   * directory but denies mmap there (g_mapped_file_new fails with EACCES). */
+  if (!g_file_get_contents (path, &contents, &len, &read_error))
     {
-      if (!g_error_matches (error, G_FILE_ERROR, G_FILE_ERROR_NOENT))
-        g_warning ("Could not read learned samples %s: %s", path, error->message);
+      if (g_error_matches (read_error, G_FILE_ERROR, G_FILE_ERROR_NOENT))
+        return NULL;
+      g_propagate_prefixed_error (error, g_steal_pointer (&read_error),
+                                  "Could not read learned samples: ");
       return NULL;
     }
 
-  bytes = g_mapped_file_get_bytes (file);
+  bytes = g_bytes_new_take (g_steal_pointer (&contents), len);
   data = g_variant_ref_sink (g_variant_new_from_bytes (G_VARIANT_TYPE (LEARN_FORMAT),
                                                        bytes, FALSE));
   /* A truncated or foreign file would otherwise read as default values. */
@@ -154,4 +159,42 @@ elan0c7f_learn_save (const char *dir, const char *key, GVariant *learned,
   return g_file_set_contents_full (path, g_variant_get_data (normal),
                                    g_variant_get_size (normal),
                                    G_FILE_SET_CONTENTS_CONSISTENT, 0600, error);
+}
+
+/* A SHA-256 in lower-case hex, as elan0c7f_learn_key() names files. */
+static gboolean
+is_key (const char *name)
+{
+  if (strlen (name) != 64)
+    return FALSE;
+  for (const char *c = name; *c; c++)
+    if (!g_ascii_isdigit (*c) && !(*c >= 'a' && *c <= 'f'))
+      return FALSE;
+  return TRUE;
+}
+
+guint
+elan0c7f_learn_sweep (const char *dir, GHashTable *keep)
+{
+  g_autoptr(GDir) d = g_dir_open (dir, 0, NULL);
+  const char *name;
+  guint removed = 0;
+
+  if (!d)
+    return 0;
+
+  while ((name = g_dir_read_name (d)))
+    {
+      g_autofree gchar *path = NULL;
+
+      if (!is_key (name) || g_hash_table_contains (keep, name))
+        continue;
+
+      path = g_build_filename (dir, name, NULL);
+      if (g_unlink (path) == 0)
+        removed++;
+      else
+        g_warning ("Could not remove learned samples %s: %s", path, g_strerror (errno));
+    }
+  return removed;
 }

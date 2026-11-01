@@ -38,12 +38,16 @@ const char *elan0c7f_learn_dir (void);
  * gives new samples and so a new key, which starts learning afresh. */
 gchar *elan0c7f_learn_key (GVariant *enrolled_samples);
 
-/* The samples learned for @key, an ELAN0C7F_SAMPLES_TYPE array, or NULL if
- * there are none or the file is unreadable, of another format version, or
- * not in the expected shape.  Never an error: a bad file means "nothing
- * learned yet", and the next save replaces it. */
+/* The samples learned for @key, an ELAN0C7F_SAMPLES_TYPE array, or NULL.
+ *
+ * A missing file, one of another format version, or one not in the
+ * expected shape returns NULL WITHOUT an error: that means "nothing learned
+ * yet", and the next save replaces it.  A file that exists but cannot be
+ * read returns NULL WITH @error set, and the caller must then not save:
+ * that would replace samples it could not see. */
 GVariant *elan0c7f_learn_load (const char *dir,
-                               const char *key);
+                               const char *key,
+                               GError    **error);
 
 /* @learned (may be NULL) with @sample appended, keeping at most @cap
  * samples by dropping the oldest.  Returns a new (non-floating) reference. */
@@ -58,5 +62,12 @@ gboolean elan0c7f_learn_save (const char *dir,
                               const char *key,
                               GVariant   *learned,
                               GError    **error);
+
+/* Delete every learned file in @dir whose key is not in @keep (a set of
+ * key strings), and return how many were deleted.  Only files named like a
+ * key are touched.  Used when a print has been deleted: fprintd does not
+ * tell the driver, and the learned samples are fingerprint data too. */
+guint elan0c7f_learn_sweep (const char *dir,
+                            GHashTable *keep);
 
 G_END_DECLS

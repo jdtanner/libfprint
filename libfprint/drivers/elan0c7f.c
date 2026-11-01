@@ -760,11 +760,16 @@ start_capture_ssm (FpImageDevice *idev)
 
 /* -- FpImageDevice vfuncs -- */
 
+static void sweep_learned (void);
+
 static void
 dev_open (FpImageDevice *dev)
 {
   GError *error = NULL;
   GUsbDevice *usb_dev = fpi_device_get_usb_device (FP_DEVICE (dev));
+
+  /* Also here, in case fprintd stopped before a close. */
+  sweep_learned ();
 
   if (!g_usb_device_claim_interface (usb_dev, 0, 0, &error))
     {
@@ -783,6 +788,9 @@ dev_close (FpImageDevice *dev)
 
   g_usb_device_release_interface (usb_dev, 0, 0, &error);
   g_clear_error (&error);
+
+  /* fprintd closes the device as soon as a delete finishes. */
+  sweep_learned ();
   fpi_image_device_close_complete (dev, NULL);
 }
 
@@ -956,6 +964,110 @@ set_samples (FpPrint *print, GVariantBuilder *samples)
                 g_variant_new ("(u@a(aday))", PRINT_FORMAT_VERSION,
                                g_variant_builder_end (samples)),
                 NULL);
+}
+
+/* -- Removing learned samples of deleted prints --
+ *
+ * fprintd does not tell a driver when a print is deleted, so the learned
+ * samples of a deleted print would stay on disk: unusable (nothing else has
+ * that key) but still fingerprint data.  On every open and close the driver
+ * lists the prints fprintd has stored, and removes learned files that no
+ * longer belong to one.  fprintd closes the device as soon as a delete
+ * finishes, so they go within moments.
+ *
+ * This reads fprintd's own storage, laid out as
+ * <state dir>/<user>/<driver>/<device>/<finger>, with the learned directory
+ * beside the user directories.  If any print cannot be read, nothing is
+ * removed.  Finding no prints at all removes every learned file: that is
+ * the common case of deleting one's only fingerprint.  Should fprintd ever
+ * change its layout, the cost is that learning stops working (each open
+ * clears it, and says so in the log), not that anything is kept or lost
+ * that should not be. */
+
+/* Add the learned-file key of every elan0c7f print under @root to @keys.
+ * Returns the number of prints read, or -1 if any could not be. */
+static gint
+collect_print_keys (const char *root, GHashTable *keys)
+{
+  g_autoptr(GDir) users = g_dir_open (root, 0, NULL);
+  const char *user;
+  gint found = 0;
+
+  if (!users)
+    return -1;
+
+  while ((user = g_dir_read_name (users)))
+    {
+      g_autofree gchar *drv = g_build_filename (root, user, FP_COMPONENT, NULL);
+      g_autoptr(GDir) devices = NULL;
+      const char *device;
+
+      if (!g_file_test (drv, G_FILE_TEST_IS_DIR))
+        continue;
+      devices = g_dir_open (drv, 0, NULL);
+      if (!devices)
+        return -1;
+
+      while ((device = g_dir_read_name (devices)))
+        {
+          g_autofree gchar *dev_dir = g_build_filename (drv, device, NULL);
+          g_autoptr(GDir) fingers = g_dir_open (dev_dir, 0, NULL);
+          const char *finger;
+
+          if (!fingers)
+            return -1;
+
+          while ((finger = g_dir_read_name (fingers)))
+            {
+              g_autofree gchar *path = g_build_filename (dev_dir, finger, NULL);
+              g_autofree gchar *contents = NULL;
+              g_autoptr(FpPrint) print = NULL;
+              g_autoptr(GVariant) samples = NULL;
+              g_autoptr(GError) error = NULL;
+              gsize len;
+
+              if (!g_file_get_contents (path, &contents, &len, &error))
+                return -1;
+              print = fp_print_deserialize ((const guchar *) contents, len, &error);
+              if (!print)
+                return -1;
+
+              found++;
+              samples = print_samples (print);
+              if (samples)
+                g_hash_table_add (keys, elan0c7f_learn_key (samples));
+            }
+        }
+    }
+  return found;
+}
+
+static void
+sweep_learned (void)
+{
+  const char *dir = elan0c7f_learn_dir ();
+  g_autofree gchar *root = NULL;
+
+  g_autoptr(GHashTable) keys = NULL;
+  gint prints;
+  guint removed;
+
+  if (!dir || !g_file_test (dir, G_FILE_TEST_IS_DIR))
+    return;
+
+  root = g_path_get_dirname (dir);
+  keys = g_hash_table_new_full (g_str_hash, g_str_equal, g_free, NULL);
+  prints = collect_print_keys (root, keys);
+  if (prints < 0)
+    {
+      fp_dbg ("not removing learned samples: a stored print could not be read");
+      return;
+    }
+
+  removed = elan0c7f_learn_sweep (dir, keys);
+  if (removed)
+    fp_info ("Removed learned samples of %u deleted fingerprint(s), %d stored print(s) remain",
+             removed, prints);
 }
 
 /* Debugging aid, off unless ELAN0C7F_DUMP_DIR is set: save each scan that
@@ -1138,7 +1250,11 @@ dev_print_match (FpImageDevice *dev, FpPrint *print_template, FpPrint *print,
   if (dir)
     {
       g_autofree gchar *key = elan0c7f_learn_key (templates);
-      g_autoptr(GVariant) learned = elan0c7f_learn_load (dir, key);
+      g_autoptr(GError) load_error = NULL;
+      g_autoptr(GVariant) learned = elan0c7f_learn_load (dir, key, &load_error);
+
+      if (load_error)
+        g_warning ("%s; not learning from this scan", load_error->message);
 
       if (learned && result != FPI_MATCH_SUCCESS &&
           best_score (&probe, learned, "learned", MATCH_THRESHOLD) >= MATCH_THRESHOLD)
@@ -1147,8 +1263,9 @@ dev_print_match (FpImageDevice *dev, FpPrint *print_template, FpPrint *print,
       /* Learn only from a confident match against the ENROLLED samples,
        * never from one against a learned sample: otherwise a touch a little
        * off the finger could teach it one a little further off, and the
-       * print would drift.  A wrong finger has never scored above 6. */
-      if (best >= LEARN_THRESHOLD)
+       * print would drift.  A wrong finger has never scored above 6.
+       * Never after a failed read, which would overwrite unseen samples. */
+      if (best >= LEARN_THRESHOLD && !load_error)
         {
           g_autoptr(GVariant) updated = elan0c7f_learn_add (learned, probe_v, LEARN_MAX_SAMPLES);
           g_autoptr(GError) save_error = NULL;
